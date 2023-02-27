@@ -4954,7 +4954,19 @@ class ATen(OnnxOpConverter):
 
     @classmethod
     def _check_index(cls, indices, values):
+        """Expand index tensor to 1D"""
+        def is_dynamic_shape(shape):
+            """Determine if tensor shape is dynamic"""
+            return np.any(list(map(lambda dim: isinstance(dim, tvm.tir.Any), shape)))
+
+        def is_slice_shape(shape):
+            """Determine if tensor is slice type"""
+            if len(shape) < 2:
+                return True
+            return np.any(list(map(lambda dim: dim == 1, shape[1:])))
+
         def unfolding_indices(indices, values):
+            """Unfolding slice tensor"""
             n = len(indices)
             flatten_indices = []
             slices_size = []
@@ -4971,25 +4983,38 @@ class ATen(OnnxOpConverter):
             for i in range(n):
                 unflod_slices.append(
                     fold_constant(
-                        _op.repeat(_op.tile(flatten_indices[i], (tile_size[i],)), repeat_size[i], 0)
+                        _op.repeat(
+                            _op.tile(flatten_indices[i], (tile_size[i],)), repeat_size[i], 0)
                     )
                 )
             return unflod_slices, _op.reshape(values, _op.const([-1]))
 
+        index_shape_list = [infer_shape(index) for index in indices]
         values_shape = infer_shape(values)
         if len(values_shape) != 1:
+            both_flatten = np.any(list(map(is_dynamic_shape, index_shape_list)))
+            both_flatten = both_flatten or is_dynamic_shape(values_shape)
+            both_flatten = both_flatten or (not np.all(list(map(is_slice_shape, index_shape_list))))
+            # both flatten
+            if both_flatten:
+                flatten_indices = [_op.reshape(
+                    index, _op.const([-1])) for index in indices]
+                flatten_value = _op.reshape(values, _op.const([-1]))
+                return flatten_indices, flatten_value
+            # only flat value tensor
+            elif np.all(list(map(lambda shape: len(shape) == 1, index_shape_list))):
+                flatten_value = _op.reshape(values, _op.const([-1]))
+                return indices, flatten_value
             return unfolding_indices(indices, values)
         return indices, values
 
     @classmethod
     def _index_put(cls, inputs, attr, params):
         in_tensor = inputs[0]
-        indices, values = cls._check_index(inputs[1 : len(inputs) - 2], inputs[len(inputs) - 2])
+        indices, values = cls._check_index(
+            inputs[1: len(inputs) - 2], inputs[len(inputs) - 2])
         accumulate = inputs[len(inputs) - 1].data.asnumpy() != 0
-        if not accumulate:
-            mode = "update"
-        else:
-            mode = "add"
+        mode = "add" if accumulate else "update"
         index_tensor = _op.stack(indices, axis=0)
         return _op.transform.scatter_nd(in_tensor, index_tensor, values, mode)
 

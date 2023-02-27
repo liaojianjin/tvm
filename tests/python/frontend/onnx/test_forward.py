@@ -5749,6 +5749,25 @@ def test_index_put(target, dev):
     verify_index_put_slice((2, 3, 4), (1, 2, 3), True)
     verify_index_put_slice((2, 3, 4, 5), (1, 2, 3, 1), False)
 
+    def verify_index_put_dynamic_shape(data_shape, value_shape, accumulate):
+        data = torch.ones(data_shape)
+        tvm_inputs = [data.numpy()]
+        indices = []
+        elem_size = np.product(value_shape)
+        for i, dim in enumerate(value_shape):
+            index = torch.randint(0, dim, value_shape)
+            indices.append(index)
+            tvm_inputs.append(index.numpy().astype("int32"))
+        value = torch.rand(value_shape)
+        tvm_inputs.append(value.numpy())
+
+        onnx_model = onnx.load("index_put_wo_reshape.onnx")
+        torch_out = data.index_put(indices, value)
+        tvm_out = get_tvm_output_with_vm(onnx_model, tvm_inputs, target, dev, freeze_params=True)
+        tvm.testing.assert_allclose(torch_out.numpy(), tvm_out)
+    verify_index_put_dynamic_shape((3, 3), (2, 2), False)
+    verify_index_put_dynamic_shape((9, 9), (2, 3), False)
+
 
 @tvm.testing.parametrize_targets
 def test_reverse_sequence(target, dev):
